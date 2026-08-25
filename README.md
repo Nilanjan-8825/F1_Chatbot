@@ -44,12 +44,13 @@ An intelligent, multi-agent conversational AI and REST API for Formula 1 data an
 
 4. **Database Setup:**
    Ensure you have a MySQL database named `f1_chatbot` running with the appropriate table (`ai_assistant_messages`). 
-
-   *Note: The `db.py` file expects a table named `ai_assistant_messages` with columns: `subquery_id`, `session_id`, `message_id`, `user`, `question`, `agent_question`, `response`, `citations`, `agents_used`, `visual_data`, and `needs_clarification`.*
+   
+   *Note: The `db.py` file expects a table named `ai_assistant_messages` with columns: `subquery_id`, `session_id`, `message_id`, `user`, `question`, `agent_question`, `response`, `citations`, `agents_used`, `visual_data`, and `needs_clarification`.
+   Also if desired the database names and table names can be changed but please ensure that the query , table and database changes in the codebase is done appropriately.*
 
 5. **Run the Application:**
    ```bash
-   uvicorn api:app --host 0.0.0.0 --port 8000 --reload
+   uvicorn api:app --host 0.0.0.0 --port 8000
    ```
 
 ## API Endpoints
@@ -69,3 +70,5 @@ The AI chatbot uses a **Supervisor Agent** pattern:
 3. The query is routed to the appropriate Pandas Dataframe Agent (Schedule, Results, Laps, or Telemetry).
 4. The worker dynamically writes and executes pandas code against the FastF1 data to find the answer.
 5. The final insights are synthesized by an LLM and returned to the user, complete with data for frontend visualizations if applicable.
+
+Coming releases will add more feature and functionalities to the chatbot.
