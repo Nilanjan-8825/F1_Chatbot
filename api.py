@@ -9,13 +9,14 @@ from typing import Optional, List, Dict, Any
 import fastf1
 import pandas as pd
 import uvicorn
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel
 
 import chatbot_integration
 import db
+import race_replay
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -641,6 +642,104 @@ If the data is purely descriptive with no tabular structure, do NOT output the J
         citations=["FastF1 API"],
         visual_data=visual_data
     )
+
+
+# ---------------------------------------------------------------------------
+# Race Replay Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/race-replay/sessions")
+async def get_replay_sessions(year: int = None):
+    """
+    Returns a list of available sessions for race replay.
+    """
+    try:
+        sessions = race_replay.get_available_sessions(year)
+        return sessions
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/race-replay/track")
+async def get_replay_track(year: int = 2024, event: str = "Monaco", session: str = "R"):
+    """
+    Returns the circuit shape (X/Y coordinates), corner positions, and rotation.
+    Used by the frontend to render the track map.
+    """
+    try:
+        track = race_replay.get_track_shape(year, event, session)
+        return track
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/race-replay/data")
+async def get_replay_data(year: int = 2024, event: str = "Monaco", session: str = "R"):
+    """
+    Returns the full race replay dataset: all laps, all drivers,
+    positions, timing, tires, pit events, and race control messages.
+    This is the main payload the frontend uses to animate the race.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        data = await loop.run_in_executor(
+            None,
+            lambda: race_replay.get_race_replay_data(year, event, session)
+        )
+        return data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/race-replay/positions")
+async def get_replay_positions(year: int = 2024, event: str = "Monaco", session: str = "R"):
+    """
+    Returns per-driver, per-lap normalized track positions for animation.
+    Each driver's lap has ~30 distance samples (0.0 → 1.0) that the frontend
+    interpolates along the track shape to animate driver dots.
+
+    NOTE: This endpoint is heavier than /data as it loads telemetry.
+    Consider using /data for timing-only replays and this for full animation.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        positions = await loop.run_in_executor(
+            None,
+            lambda: race_replay.get_track_positions_for_replay(year, event, session)
+        )
+        return positions
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.websocket("/api/race-replay/stream")
+async def replay_stream(websocket: WebSocket, session_key: str = None):
+    """
+    WebSocket endpoint for live race streaming (future OpenF1 integration).
+
+    Currently returns a stub message. When OpenF1 live mode is implemented,
+    this will push real-time car positions, intervals, and race events.
+    """
+    await websocket.accept()
+    try:
+        await websocket.send_json({
+            "status": "stub",
+            "message": "Live streaming is not yet implemented. "
+                       "Use GET /api/race-replay/data for historical replays.",
+            "future_features": [
+                "Real-time car positions via OpenF1 /v1/location",
+                "Live intervals via OpenF1 /v1/intervals",
+                "Live position changes via OpenF1 /v1/position",
+                "Team radio messages via OpenF1 /v1/team_radio",
+            ]
+        })
+        # Keep connection alive until client disconnects
+        while True:
+            data = await websocket.receive_text()
+            await websocket.send_json({"echo": data, "status": "stub"})
+    except WebSocketDisconnect:
+        pass
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

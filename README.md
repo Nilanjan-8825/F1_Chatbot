@@ -9,8 +9,11 @@ An intelligent, multi-agent conversational AI and REST API for Formula 1 data an
   - **Results Worker**: Finishing positions, points, grids, and race statuses.
   - **Laps Worker**: Lap-by-lap timing, sector times, and tire compounds.
   - **Telemetry Worker**: High-frequency car telemetry (speed, throttle, braking, DRS).
+  - **Weather Worker**: Session weather conditions (temperature, humidity, wind, rainfall).
+  - **Strategy Worker**: Tire strategy, pit stops, stint analysis, compound choices, and degradation patterns.
 - **FastF1 Integration**: Leverages the `fastf1` library to pull historical and session data directly from F1 APIs.
-- **RESTful API Endpoints**: Provides structured data endpoints (`/api/schedule`, `/api/standings`, `/api/telemetry`, etc.) for building custom frontends or dashboards.
+- **RESTful API Endpoints**: Provides structured data endpoints for building custom frontends or dashboards.
+- **Race Replay Backend**: Pre-computes lap-by-lap position data, track shapes, and race events for animated race replays. WebSocket stub ready for future live streaming via OpenF1.
 - **Persistent Chat History**: Stores user conversations, agent routing decisions, and visual data requests in a MySQL database.
 - **Dynamic Visualizations**: The AI automatically detects when tabular data should be represented visually and returns structured JSON for rendering charts (tables, pie charts, bar charts).
 
@@ -18,6 +21,7 @@ An intelligent, multi-agent conversational AI and REST API for Formula 1 data an
 
 - Python 3.8+
 - MySQL Server
+- numpy (`pip install numpy`)
 
 ## Setup
 
@@ -54,18 +58,61 @@ An intelligent, multi-agent conversational AI and REST API for Formula 1 data an
 
 ## API Endpoints
 
-- `GET /api/schedule?year={year}`: Returns the schedule for a given year.
-- `GET /api/standings?year={year}`: Returns driver standings.
-- `GET /api/telemetry?year={year}&event={event}&session={session}&drivers={drivers}&lap={lap}`: Returns raw telemetry for charting.
-- `GET /api/drivers?year={year}&event={event}&session={session}`: Lists all drivers in a session.
-- `GET /api/laps?year={year}&event={event}&session={session}`: Returns the total number of laps in a session.
-- `POST /api/chat`: The main endpoint for natural language queries.
+### Core Endpoints
+- `GET /api/schedule?year={year}` — Season schedule for a given year.
+- `GET /api/standings?year={year}` — Driver championship standings.
+- `GET /api/constructor-standings?year={year}` — Constructor (team) championship standings.
+- `GET /api/drivers?year={year}&event={event}&session={session}` — Lists all drivers in a session.
+- `GET /api/laps?year={year}&event={event}&session={session}` — Total number of laps in a session.
+- `POST /api/chat` — Natural language queries via the multi-agent chatbot.
+
+### Telemetry & Analysis
+- `GET /api/telemetry?year={year}&event={event}&session={session}&drivers={drivers}&lap={lap}` — Raw telemetry (throttle, speed, distance).
+- `GET /api/sector-times?year={year}&event={event}&session={session}&drivers={drivers}&lap={lap}` — Sector breakdown with purple (session best) markers.
+- `GET /api/qualifying?year={year}&event={event}` — Q1/Q2/Q3 times with gap to pole and elimination info.
+
+### Weather & Strategy
+- `GET /api/weather?year={year}&event={event}&session={session}` — Weather data (temperature, humidity, wind, rainfall).
+- `GET /api/pit-stops?year={year}&event={event}&session={session}&driver={driver}` — Pit stop events and stint timelines per driver.
+- `GET /api/race-control?year={year}&event={event}&session={session}` — Race control messages (safety car, VSC, flags, penalties).
+- `GET /api/tire-degradation?year={year}&event={event}&session={session}&drivers={drivers}` — Lap time vs tire age per stint for degradation curves.
+
+### Race Replay
+- `GET /api/race-replay/sessions?year={year}` — Available sessions for replay.
+- `GET /api/race-replay/track?year={year}&event={event}&session={session}` — Circuit shape (X/Y coordinates), corners, and rotation angle.
+- `GET /api/race-replay/data?year={year}&event={event}&session={session}` — Full race replay dataset (all laps, all drivers, positions, timing, tires, events).
+- `GET /api/race-replay/positions?year={year}&event={event}&session={session}` — Per-driver, per-lap normalized track positions for dot animation.
+- `WS /api/race-replay/stream?session_key={key}` — WebSocket for future live streaming (currently returns stub).
 
 ## Architecture
 
 The AI chatbot uses a **Supervisor Agent** pattern:
 1. The user sends a query to `/api/chat`.
 2. The `Supervisor` node evaluates the query, extracts entities (Year, Event, Session), and determines which specialized worker needs to handle it.
-3. The query is routed to the appropriate Pandas Dataframe Agent (Schedule, Results, Laps, or Telemetry).
+3. The query is routed to the appropriate Pandas Dataframe Agent (Schedule, Results, Laps, Telemetry, Weather, or Strategy).
 4. The worker dynamically writes and executes pandas code against the FastF1 data to find the answer.
 5. The final insights are synthesized by an LLM and returned to the user, complete with data for frontend visualizations if applicable.
+
+### Race Replay Architecture
+
+The race replay backend (`race_replay.py`) pre-computes all data needed for animated replays:
+- **Track Shape**: Extracted from the fastest lap's GPS position data, rotated and normalized.
+- **Lap Data**: Per-driver, per-lap position, timing, tire compound, stint, pit events.
+- **Gap Computation**: Cumulative time gaps to the race leader.
+- **Race Events**: Safety car, VSC, red flags, penalties extracted from race control messages.
+- **Animation Positions**: Normalized distance progression (0.0→1.0) around the track for smooth dot animation.
+
+Data is cached in memory to avoid re-processing expensive FastF1 session loads.
+
+## Project Structure
+
+```
+F1_project/
+├── api.py                  # FastAPI application with all REST endpoints
+├── chatbot_integration.py  # LangGraph multi-agent chatbot (Supervisor + 6 Workers)
+├── race_replay.py          # Race replay data processing module
+├── db.py                   # MySQL database layer for chat history
+├── requirements.txt        # Python dependencies
+├── .env                    # Environment variables (API keys, DB credentials)
+└── README.md               # This file
+```
