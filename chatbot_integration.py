@@ -37,7 +37,7 @@ class SupervisorOutput(BaseModel):
     year: Optional[int] = Field(default=None, description="The 4-digit race year extracted from the query, or None if unknown.")
     event: Optional[str] = Field(default=None, description="The clean name of the F1 race weekend event (e.g., 'Monaco', 'Miami'), or None if unknown.")
     session_type: Optional[Literal['R', 'Q', 'S']] = Field(default=None, description="The F1 session type: 'R' for Race, 'Q' for Qualifying, 'S' for Sprint. Default to 'R' if unsure.")
-    next_node: Literal["ScheduleWorker", "ResultsWorker", "LapsWorker", "TelemetryWorker", "FINISH"] = Field(
+    next_node: Literal["ScheduleWorker", "ResultsWorker", "LapsWorker", "TelemetryWorker", "WeatherWorker", "StrategyWorker", "FINISH"] = Field(
         description="The next specialized worker node to call based on what data is required, or 'FINISH' if the final answer is ready or if clarification is needed."
     )
     visual_data: Optional[Dict[str, Any]] = Field(default=None, description="If FINISH, output visualization payload here. Contains 'type' (table, pie_chart, bar_chart), 'title', and 'data'.")
@@ -93,6 +93,46 @@ def create_specialized_f1_agent(agent_type: str, year: int, event: str, session_
             "- 'Brake' is a boolean (True/False).\n"
             "- 'Distance' measures progression down the track matrix. Use it as your X-axis reference."
         )
+
+    elif agent_type == 'weather':
+        session = fastf1.get_session(year, event, session_str)
+        session.load(laps=False, telemetry=False, weather=True)
+        df = pd.DataFrame(session.weather_data)
+        specialized_instructions = (
+            "You are analyzing weather conditions during an F1 session. Available columns include:\n"
+            "- 'Time': Timestamp relative to session start.\n"
+            "- 'AirTemp': Air temperature in Celsius.\n"
+            "- 'TrackTemp': Track surface temperature in Celsius.\n"
+            "- 'Humidity': Relative humidity percentage.\n"
+            "- 'WindSpeed': Wind speed in m/s.\n"
+            "- 'WindDirection': Wind direction in degrees.\n"
+            "- 'Rainfall': Boolean indicating if it was raining.\n"
+            "- 'Pressure': Atmospheric pressure in mbar.\n"
+            "Use this data to describe weather patterns, identify rain periods, "
+            "and correlate conditions with session events."
+        )
+
+    elif agent_type == 'strategy':
+        session = fastf1.get_session(year, event, session_str)
+        session.load(laps=True, telemetry=False, weather=False)
+        strategy_cols = ['Driver', 'LapNumber', 'LapTime', 'Stint', 'Compound',
+                         'TyreLife', 'PitInTime', 'PitOutTime', 'Position',
+                         'Sector1Time', 'Sector2Time', 'Sector3Time']
+        available_cols = [c for c in strategy_cols if c in session.laps.columns]
+        df = pd.DataFrame(session.laps[available_cols])
+        specialized_instructions = (
+            "You are analyzing race strategy and tire management. Key columns:\n"
+            "- 'Stint': Sequential stint number (increments after each pit stop).\n"
+            "- 'Compound': Tire compound ('SOFT', 'MEDIUM', 'HARD', 'INTERMEDIATE', 'WET').\n"
+            "- 'TyreLife': Number of laps on the current set of tires.\n"
+            "- 'PitInTime': Time the car entered pit lane (NaT if no pit stop on this lap).\n"
+            "- 'PitOutTime': Time the car exited pit lane.\n"
+            "- 'LapTime': Total lap time (timedelta). Use .total_seconds() for numerical comparisons.\n"
+            "To find pit stops, look for rows where PitInTime is not NaT.\n"
+            "To analyze tire degradation, compare LapTime vs TyreLife grouped by Compound and Stint.\n"
+            "To compare strategies between drivers, group by Driver and Stint."
+        )
+
     else:
         raise ValueError(f"Unknown agent type: {agent_type}")
 
@@ -146,6 +186,8 @@ Your job is to break down the user's request, identify the required data types, 
 2. 'ResultsWorker': For finishing positions, points, grids, and statuses (DNFs).
 3. 'LapsWorker': For lap times, sector times, tire compounds, and stint timelines.
 4. 'TelemetryWorker': For speed traps, throttle profiles, braking points, and gears.
+5. 'WeatherWorker': For weather conditions during a session — temperature, humidity, wind, rainfall, and track temperature.
+6. 'StrategyWorker': For tire strategy, pit stops, stint analysis, compound choices, undercuts/overcuts, and tire degradation patterns.
 
 BEFORE routing to any worker, you MUST check if the query has enough info. If ANY of the following are true, set needs_clarification=True, next_node='FINISH', and provide a clarification_question:
 
@@ -196,7 +238,7 @@ Current State Context: {context}
         "clarification_question": None
     }
 
-def supervisor_router(state: F1AgentState) -> Literal["ScheduleWorker", "ResultsWorker", "LapsWorker", "TelemetryWorker", "__end__"]:
+def supervisor_router(state: F1AgentState) -> Literal["ScheduleWorker", "ResultsWorker", "LapsWorker", "TelemetryWorker", "WeatherWorker", "StrategyWorker", "__end__"]:
     """
     Conditional edge router that reads state['next_node'] to determine graph direction.
     """
@@ -226,6 +268,16 @@ def telemetry_worker_node(state: F1AgentState):
     res = agent.invoke({"input": state["user_query"]})
     return {"context": [f"[Telemetry Data]: {res['output']}"]}
 
+def weather_worker_node(state: F1AgentState):
+    agent, df = create_specialized_f1_agent('weather', state['year'], state['event'], state['session_type'])
+    res = agent.invoke({"input": state["user_query"]})
+    return {"context": [f"[Weather Data]: {res['output']}"]}
+
+def strategy_worker_node(state: F1AgentState):
+    agent, df = create_specialized_f1_agent('strategy', state['year'], state['event'], state['session_type'])
+    res = agent.invoke({"input": state["user_query"]})
+    return {"context": [f"[Strategy Data]: {res['output']}"]}
+
 
 workflow = StateGraph(F1AgentState)
 
@@ -234,6 +286,8 @@ workflow.add_node("ScheduleWorker", schedule_worker_node)
 workflow.add_node("ResultsWorker", results_worker_node)
 workflow.add_node("LapsWorker", laps_worker_node)
 workflow.add_node("TelemetryWorker", telemetry_worker_node)
+workflow.add_node("WeatherWorker", weather_worker_node)
+workflow.add_node("StrategyWorker", strategy_worker_node)
 
 workflow.set_entry_point("Supervisor")
 
@@ -245,6 +299,8 @@ workflow.add_conditional_edges(
         "ResultsWorker": "ResultsWorker",
         "LapsWorker": "LapsWorker",
         "TelemetryWorker": "TelemetryWorker",
+        "WeatherWorker": "WeatherWorker",
+        "StrategyWorker": "StrategyWorker",
         END: END
     }
 )
@@ -253,6 +309,8 @@ workflow.add_edge("ScheduleWorker", "Supervisor")
 workflow.add_edge("ResultsWorker", "Supervisor")
 workflow.add_edge("LapsWorker", "Supervisor")
 workflow.add_edge("TelemetryWorker", "Supervisor")
+workflow.add_edge("WeatherWorker", "Supervisor")
+workflow.add_edge("StrategyWorker", "Supervisor")
 
 
 f1_chatbot = workflow.compile()

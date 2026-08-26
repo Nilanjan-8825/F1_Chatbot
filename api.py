@@ -173,6 +173,333 @@ async def get_laps(year: int = 2024, event: str = "Monaco", session: str = "R"):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/weather")
+async def get_weather(year: int = 2024, event: str = "Monaco", session: str = "R"):
+    """
+    Returns weather data throughout the session (temperature, humidity, wind, rainfall).
+    """
+    try:
+        sess = fastf1.get_session(year, event, session)
+        sess.load(laps=False, telemetry=False, weather=True, messages=False)
+
+        weather = sess.weather_data
+        if weather is None or weather.empty:
+            return []
+
+        records = []
+        for _, row in weather.iterrows():
+            records.append({
+                "time": str(row.get("Time", "")),
+                "air_temp": round(float(row["AirTemp"]), 1) if pd.notna(row.get("AirTemp")) else None,
+                "track_temp": round(float(row["TrackTemp"]), 1) if pd.notna(row.get("TrackTemp")) else None,
+                "humidity": round(float(row["Humidity"]), 1) if pd.notna(row.get("Humidity")) else None,
+                "wind_speed": round(float(row["WindSpeed"]), 1) if pd.notna(row.get("WindSpeed")) else None,
+                "wind_direction": int(row["WindDirection"]) if pd.notna(row.get("WindDirection")) else None,
+                "rainfall": bool(row["Rainfall"]) if pd.notna(row.get("Rainfall")) else None,
+                "pressure": round(float(row["Pressure"]), 1) if pd.notna(row.get("Pressure")) else None,
+            })
+        return records
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/pit-stops")
+async def get_pit_stops(year: int = 2024, event: str = "Monaco", session: str = "R", driver: str = None):
+    """
+    Returns pit stop events and stint timelines per driver.
+    """
+    try:
+        sess = fastf1.get_session(year, event, session)
+        sess.load(laps=True, telemetry=False, weather=False, messages=False)
+
+        laps = sess.laps
+        driver_list = [driver] if driver else laps['Driver'].unique().tolist()
+
+        result = {}
+        for drv in driver_list:
+            driver_laps = laps.pick_driver(drv)
+            if driver_laps.empty:
+                continue
+
+            # Build stints
+            stints = []
+            for stint_num in sorted(driver_laps['Stint'].dropna().unique()):
+                stint_laps = driver_laps[driver_laps['Stint'] == stint_num]
+                compound = str(stint_laps['Compound'].iloc[0]) if not stint_laps.empty else "UNKNOWN"
+                start_lap = int(stint_laps['LapNumber'].min())
+                end_lap = int(stint_laps['LapNumber'].max())
+                stints.append({
+                    "stint": int(stint_num),
+                    "compound": compound,
+                    "start_lap": start_lap,
+                    "end_lap": end_lap,
+                    "laps": end_lap - start_lap + 1,
+                })
+
+            # Build pit stop events (laps where PitInTime is not NaT)
+            stops = []
+            pit_laps = driver_laps[driver_laps['PitInTime'].notna()]
+            for _, pit_lap in pit_laps.iterrows():
+                lap_num = int(pit_lap['LapNumber'])
+                compound_before = str(pit_lap['Compound'])
+
+                # Find the next stint's compound
+                next_laps = driver_laps[driver_laps['LapNumber'] > lap_num]
+                compound_after = str(next_laps['Compound'].iloc[0]) if not next_laps.empty else "N/A"
+
+                pit_in = pit_lap['PitInTime']
+                pit_out = pit_lap['PitOutTime']
+                duration = None
+                if pd.notna(pit_in) and pd.notna(pit_out):
+                    duration = round((pit_out - pit_in).total_seconds(), 3)
+
+                stops.append({
+                    "lap": lap_num,
+                    "pit_duration_seconds": duration,
+                    "compound_before": compound_before,
+                    "compound_after": compound_after,
+                    "tyre_life_before": int(pit_lap['TyreLife']) if pd.notna(pit_lap.get('TyreLife')) else None,
+                })
+
+            result[drv] = {"stops": stops, "stints": stints}
+
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/race-control")
+async def get_race_control(year: int = 2024, event: str = "Monaco", session: str = "R"):
+    """
+    Returns race control messages: safety car, VSC, flags, penalties, deleted laps.
+    """
+    try:
+        sess = fastf1.get_session(year, event, session)
+        sess.load(laps=False, telemetry=False, weather=False, messages=True)
+
+        messages = sess.race_control_messages
+        if messages is None or messages.empty:
+            return []
+
+        records = []
+        for _, row in messages.iterrows():
+            records.append({
+                "time": str(row.get("Time", "")),
+                "lap_number": int(row["Lap"]) if pd.notna(row.get("Lap")) else None,
+                "category": str(row.get("Category", "")),
+                "message": str(row.get("Message", "")),
+                "flag": str(row.get("Flag", "")) if pd.notna(row.get("Flag")) else None,
+                "driver_number": str(row.get("RacingNumber", "")) if pd.notna(row.get("RacingNumber")) else None,
+            })
+        return records
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/tire-degradation")
+async def get_tire_degradation(year: int = 2024, event: str = "Monaco", session: str = "R", drivers: str = None):
+    """
+    Returns lap time vs tire age per driver per stint — ready for degradation curve plotting.
+    """
+    try:
+        sess = fastf1.get_session(year, event, session)
+        sess.load(laps=True, telemetry=False, weather=False, messages=False)
+
+        laps = sess.laps
+        driver_list = drivers.split(',') if drivers else laps['Driver'].unique().tolist()
+
+        result = {}
+        for drv in driver_list:
+            driver_laps = laps.pick_driver(drv)
+            if driver_laps.empty:
+                continue
+
+            driver_stints = []
+            for stint_num in sorted(driver_laps['Stint'].dropna().unique()):
+                stint_laps = driver_laps[driver_laps['Stint'] == stint_num]
+                compound = str(stint_laps['Compound'].iloc[0]) if not stint_laps.empty else "UNKNOWN"
+
+                lap_data = []
+                for _, lap in stint_laps.iterrows():
+                    if pd.notna(lap.get('LapTime')):
+                        lap_data.append({
+                            "lap": int(lap['LapNumber']),
+                            "tyre_life": int(lap['TyreLife']) if pd.notna(lap.get('TyreLife')) else None,
+                            "lap_time_seconds": round(lap['LapTime'].total_seconds(), 3),
+                        })
+
+                if lap_data:
+                    driver_stints.append({
+                        "stint": int(stint_num),
+                        "compound": compound,
+                        "laps": lap_data,
+                    })
+
+            if driver_stints:
+                result[drv] = driver_stints
+
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/constructor-standings")
+async def get_constructor_standings(year: int = 2024):
+    """
+    Returns constructor (team) championship standings from the Ergast API.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        url = f"http://api.jolpi.ca/ergast/f1/{year}/constructorStandings.json"
+
+        response = await loop.run_in_executor(None, lambda: requests.get(url, timeout=10))
+        response.raise_for_status()
+        data = response.json()
+
+        standings = data["MRData"]["StandingsTable"]["StandingsLists"][0]["ConstructorStandings"]
+
+        formatted = []
+        for s in standings:
+            formatted.append({
+                "position": int(s["position"]),
+                "constructor": s["Constructor"]["name"],
+                "nationality": s["Constructor"].get("nationality", ""),
+                "points": float(s["points"]),
+                "wins": int(s.get("wins", 0)),
+            })
+
+        return formatted
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/qualifying")
+async def get_qualifying(year: int = 2024, event: str = "Monaco"):
+    """
+    Returns Q1/Q2/Q3 qualifying times for all drivers with gap-to-pole and elimination info.
+    """
+    try:
+        sess = fastf1.get_session(year, event, "Q")
+        sess.load(laps=False, telemetry=False, weather=False, messages=False)
+
+        results = sess.results
+        if results is None or results.empty:
+            return []
+
+        # Determine pole time for gap calculation
+        pole_time = None
+        q3_times = results['Q3'].dropna()
+        if not q3_times.empty:
+            pole_time = q3_times.min()
+
+        formatted = []
+        for _, row in results.iterrows():
+            q1 = row.get('Q1')
+            q2 = row.get('Q2')
+            q3 = row.get('Q3')
+
+            # Determine elimination stage
+            eliminated_in = None
+            if pd.isna(q3) and pd.notna(q2):
+                eliminated_in = "Q2"
+            elif pd.isna(q2) and pd.notna(q1):
+                eliminated_in = "Q1"
+            elif pd.isna(q1):
+                eliminated_in = "DNS"
+
+            # Calculate gap to pole (using best qualifying time)
+            best_time = q3 if pd.notna(q3) else (q2 if pd.notna(q2) else q1)
+            gap = None
+            if best_time is not None and pole_time is not None and pd.notna(best_time) and pd.notna(pole_time):
+                gap = round((best_time - pole_time).total_seconds(), 3)
+
+            formatted.append({
+                "position": int(row["Position"]) if pd.notna(row.get("Position")) else None,
+                "driver": row.get("Abbreviation", ""),
+                "full_name": row.get("FullName", ""),
+                "team": row.get("TeamName", ""),
+                "q1": str(q1) if pd.notna(q1) else None,
+                "q2": str(q2) if pd.notna(q2) else None,
+                "q3": str(q3) if pd.notna(q3) else None,
+                "gap_to_pole": gap,
+                "eliminated_in": eliminated_in,
+            })
+
+        formatted.sort(key=lambda x: x["position"] if x["position"] is not None else 999)
+        return formatted
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/sector-times")
+async def get_sector_times(year: int = 2024, event: str = "Monaco", session: str = "R", drivers: str = None, lap: str = None):
+    """
+    Returns sector time breakdowns with session-best (purple sector) markers.
+    """
+    try:
+        sess = fastf1.get_session(year, event, session)
+        sess.load(laps=True, telemetry=False, weather=False, messages=False)
+
+        laps = sess.laps
+
+        # Filter to laps with valid sector times
+        valid_laps = laps[
+            laps['Sector1Time'].notna() &
+            laps['Sector2Time'].notna() &
+            laps['Sector3Time'].notna()
+        ]
+
+        # Compute session best sectors
+        session_best = {}
+        for sector_col, sector_key in [('Sector1Time', 'sector_1'), ('Sector2Time', 'sector_2'), ('Sector3Time', 'sector_3')]:
+            if not valid_laps.empty:
+                best_idx = valid_laps[sector_col].idxmin()
+                best_row = valid_laps.loc[best_idx]
+                best_time = round(best_row[sector_col].total_seconds(), 3)
+                session_best[sector_key] = {
+                    "driver": best_row['Driver'],
+                    "time_seconds": best_time,
+                }
+
+        # Get per-driver sector times
+        driver_list = drivers.split(',') if drivers else valid_laps['Driver'].unique().tolist()
+
+        driver_sectors = {}
+        for drv in driver_list:
+            drv_laps = valid_laps[valid_laps['Driver'] == drv]
+            if drv_laps.empty:
+                continue
+
+            if lap and lap.isdigit():
+                drv_laps = drv_laps[drv_laps['LapNumber'] == int(lap)]
+
+            sector_data = []
+            for _, row in drv_laps.iterrows():
+                s1 = round(row['Sector1Time'].total_seconds(), 3)
+                s2 = round(row['Sector2Time'].total_seconds(), 3)
+                s3 = round(row['Sector3Time'].total_seconds(), 3)
+
+                sector_data.append({
+                    "lap": int(row['LapNumber']),
+                    "sector_1": s1,
+                    "sector_2": s2,
+                    "sector_3": s3,
+                    "is_best_s1": s1 == session_best.get("sector_1", {}).get("time_seconds"),
+                    "is_best_s2": s2 == session_best.get("sector_2", {}).get("time_seconds"),
+                    "is_best_s3": s3 == session_best.get("sector_3", {}).get("time_seconds"),
+                })
+
+            if sector_data:
+                driver_sectors[drv] = sector_data
+
+        return {
+            "session_best_sectors": session_best,
+            "drivers": driver_sectors,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat_endpoint(request: Request, body: ChatRequest):
     """
