@@ -2,6 +2,7 @@ f1/
 .env
 __pycache__/
 fastf1_http_cache.sqlite
+fasstf1_cache
 20*/
 venv/
 .venv/

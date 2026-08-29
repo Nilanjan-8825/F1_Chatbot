@@ -21,28 +21,7 @@ import numpy as np
 import pandas as pd
 
 
-# ---------------------------------------------------------------------------
-# Caching wrapper — keyed by (year, event, session_type) to avoid reloading
-# ---------------------------------------------------------------------------
-
-_session_cache: Dict[str, Any] = {}
-
-
-def _get_or_load_session(year: int, event: str, session_type: str,
-                         laps: bool = True, telemetry: bool = False,
-                         weather: bool = False, messages: bool = False):
-    """Load and cache a FastF1 session to avoid redundant network/disk I/O."""
-    cache_key = f"{year}_{event}_{session_type}_l{laps}_t{telemetry}_w{weather}_m{messages}"
-    if cache_key not in _session_cache:
-        sess = fastf1.get_session(year, event, session_type)
-        sess.load(laps=laps, telemetry=telemetry, weather=weather, messages=messages)
-        _session_cache[cache_key] = sess
-    return _session_cache[cache_key]
-
-
-def clear_cache():
-    """Clear the session cache (useful for memory management)."""
-    _session_cache.clear()
+from services.fastf1_service import FastF1Service
 
 
 # ---------------------------------------------------------------------------
@@ -59,7 +38,7 @@ def get_track_shape(year: int, event: str, session_type: str = "R") -> Dict[str,
       - rotation: rotation angle applied (degrees)
       - circuit_name: name of the circuit
     """
-    sess = _get_or_load_session(year, event, session_type, laps=True, telemetry=True)
+    sess = FastF1Service.get_session(year, event, session_type, with_telemetry=True)
 
     # Get track coordinates from the fastest lap
     fastest_lap = sess.laps.pick_fastest()
@@ -132,9 +111,7 @@ def get_race_replay_data(year: int, event: str, session_type: str = "R") -> Dict
       - events: list of race control events (SC, VSC, flags)
     """
     # Load session with laps + messages (no telemetry for performance)
-    sess = _get_or_load_session(year, event, session_type,
-                                laps=True, telemetry=False,
-                                weather=False, messages=True)
+    sess = FastF1Service.get_session(year, event, session_type, with_messages=True)
 
     all_laps = sess.laps
     if all_laps is None or all_laps.empty:
@@ -202,8 +179,7 @@ def get_track_positions_for_replay(year: int, event: str, session_type: str = "R
       - driver_positions: dict keyed by driver code, containing per-lap
         normalized distance samples
     """
-    sess = _get_or_load_session(year, event, session_type,
-                                laps=True, telemetry=True)
+    sess = FastF1Service.get_session(year, event, session_type, with_telemetry=True)
 
     all_laps = sess.laps
     total_laps = int(all_laps['LapNumber'].max())
@@ -216,7 +192,7 @@ def get_track_positions_for_replay(year: int, event: str, session_type: str = "R
     drivers = all_laps['Driver'].unique()
 
     for drv in drivers:
-        drv_laps = all_laps.pick_driver(drv)
+        drv_laps = all_laps.pick_drivers(drv)
         drv_positions = {}
 
         for _, lap_row in drv_laps.iterrows():
@@ -299,7 +275,7 @@ def get_available_sessions(year: Optional[int] = None) -> List[Dict[str, Any]]:
 
     for y in years:
         try:
-            schedule = fastf1.get_event_schedule(y)
+            schedule = FastF1Service.get_schedule(y)
             for _, event in schedule.iterrows():
                 if pd.notna(event.get('EventDate')):
                     sessions.append({

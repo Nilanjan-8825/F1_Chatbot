@@ -14,7 +14,8 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_experimental.agents.agent_toolkits.pandas.base import create_pandas_dataframe_agent
 from langgraph.graph import StateGraph, END
 
-fastf1.Cache.enable_cache('C:/Users/Asus/Desktop/ML_Projects/F1_project')
+from services.fastf1_service import FastF1Service
+from models.schemas import SupervisorOutput
 
 llm = ChatGoogleGenerativeAI(
     model="gemini-3.1-flash-lite",
@@ -33,23 +34,14 @@ class F1AgentState(TypedDict):
     needs_clarification: bool
     clarification_question: Optional[str]
 
-class SupervisorOutput(BaseModel):
-    year: Optional[int] = Field(default=None, description="The 4-digit race year extracted from the query, or None if unknown.")
-    event: Optional[str] = Field(default=None, description="The clean name of the F1 race weekend event (e.g., 'Monaco', 'Miami'), or None if unknown.")
-    session_type: Optional[Literal['R', 'Q', 'S']] = Field(default=None, description="The F1 session type: 'R' for Race, 'Q' for Qualifying, 'S' for Sprint. Default to 'R' if unsure.")
-    next_node: Literal["ScheduleWorker", "ResultsWorker", "LapsWorker", "TelemetryWorker", "WeatherWorker", "StrategyWorker", "FINISH"] = Field(
-        description="The next specialized worker node to call based on what data is required, or 'FINISH' if the final answer is ready or if clarification is needed."
-    )
-    visual_data: Optional[Dict[str, Any]] = Field(default=None, description="If FINISH, output visualization payload here. Contains 'type' (table, pie_chart, bar_chart), 'title', and 'data'.")
-    needs_clarification: bool = Field(default=False, description="Set to True if the query is missing critical info (year, event) or is ambiguous and needs user clarification before proceeding.")
-    clarification_question: Optional[str] = Field(default=None, description="A natural follow-up question to ask the user when needs_clarification is True.")
+
 
 def create_specialized_f1_agent(agent_type: str, year: int, event: str, session_str: str):
     """
     Dynamically fetches data from FastF1 APIs and wraps it into a customized Pandas Dataframe Agent.
     """
     if agent_type == 'schedule':
-        df = pd.DataFrame(fastf1.get_event_schedule(year))
+        df = pd.DataFrame(FastF1Service.get_schedule(year))
         specialized_instructions = (
             "You are looking at the season schedule. Look at the 'EventFormat' column "
             "to find Sprint weekends (formats like 'sprint' or 'sprint_qualifying'). "
@@ -57,8 +49,7 @@ def create_specialized_f1_agent(agent_type: str, year: int, event: str, session_
         )
         
     elif agent_type == 'results':
-        session = fastf1.get_session(year, event, session_str)
-        session.load(laps=False, telemetry=False, weather=False)
+        session = FastF1Service.get_session(year, event, session_str)
         df = pd.DataFrame(session.results)
         specialized_instructions = (
             "You are analyzing race/session results. Useful columns include:\n"
@@ -70,8 +61,7 @@ def create_specialized_f1_agent(agent_type: str, year: int, event: str, session_
         )
         
     elif agent_type == 'laps':
-        session = fastf1.get_session(year, event, session_str)
-        session.load(laps=True, telemetry=False, weather=False)
+        session = FastF1Service.get_session(year, event, session_str)
         df = pd.DataFrame(session.laps)
         specialized_instructions = (
             "You are analyzing lap-by-lap timing. Crucial rules:\n"
@@ -83,8 +73,7 @@ def create_specialized_f1_agent(agent_type: str, year: int, event: str, session_
         )
         
     elif agent_type == 'telemetry':
-        session = fastf1.get_session(year, event, session_str)
-        session.load(laps=True, telemetry=True, weather=False)
+        session = FastF1Service.get_session(year, event, session_str, with_telemetry=True)
         df = session.laps.pick_fastest().get_telemetry() 
         specialized_instructions = (
             "You are handling high-frequency car telemetry (Speed, RPM, Throttle, Brake, Gear, DRS).\n"
@@ -95,8 +84,7 @@ def create_specialized_f1_agent(agent_type: str, year: int, event: str, session_
         )
 
     elif agent_type == 'weather':
-        session = fastf1.get_session(year, event, session_str)
-        session.load(laps=False, telemetry=False, weather=True)
+        session = FastF1Service.get_session(year, event, session_str, with_weather=True)
         df = pd.DataFrame(session.weather_data)
         specialized_instructions = (
             "You are analyzing weather conditions during an F1 session. Available columns include:\n"
@@ -113,8 +101,7 @@ def create_specialized_f1_agent(agent_type: str, year: int, event: str, session_
         )
 
     elif agent_type == 'strategy':
-        session = fastf1.get_session(year, event, session_str)
-        session.load(laps=True, telemetry=False, weather=False)
+        session = FastF1Service.get_session(year, event, session_str)
         strategy_cols = ['Driver', 'LapNumber', 'LapTime', 'Stint', 'Compound',
                          'TyreLife', 'PitInTime', 'PitOutTime', 'Position',
                          'Sector1Time', 'Sector2Time', 'Sector3Time']
